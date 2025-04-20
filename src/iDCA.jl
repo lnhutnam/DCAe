@@ -1,10 +1,10 @@
-# DCAe.jl - DCA with Extrapolation implementation
+# iDCA.jl - Inertial Difference of Convex Algorithm implementation
 
 """
-    DCAe(D, lam, theta, para)
+    iDCA(D, lam, theta, para)
 
-Implement the DCA with Extrapolation algorithm for matrix factorization.
-This version uses Nesterov-style acceleration.
+Implement the inertial Difference of Convex Algorithm for matrix factorization.
+This version adds inertial terms to accelerate convergence.
 
 # Arguments
 - `D`: Sparse input data matrix
@@ -20,9 +20,9 @@ This version uses Nesterov-style acceleration.
   - Time: Cumulative runtime
   - And other metrics
 """
-function DCAe(D, lam, theta, para)
+function iDCA(D, lam, theta, para)
     output = Dict{Symbol, Any}()
-    output[:method] = "DCAe"
+    output[:method] = "iDCA"
     
     max_R = get(para, :maxR, min(size(D)...))
     max_iter = para[:maxIter]
@@ -35,8 +35,7 @@ function DCAe(D, lam, theta, para)
     U0 = para[:U0]
     U1 = copy(U0)
     
-    F = svd(U0' * D)
-    V0 = F.Vt
+    V0 = para[:V0]'
     V1 = copy(V0)
     
     spa = sparse(row, col, data, m, n)
@@ -46,6 +45,7 @@ function DCAe(D, lam, theta, para)
     
     # Initialize tracking variables
     obj = zeros(max_iter + 1)
+    obj_y = zeros(max_iter + 1)
     RMSE = zeros(max_iter + 1)
     train_RMSE = zeros(max_iter + 1)
     Time = zeros(max_iter + 1)
@@ -60,18 +60,11 @@ function DCAe(D, lam, theta, para)
     ga = theta
     fun_num = para[:fun_num]
     
+    obj[1] = obj_func(part0, U0, V0, lam, fun_num, ga)
+    obj_y[1] = obj[1]
+    
     L = 1
-    uL = 1
-    C = 0.9999
-    
-    norm1 = norm(U1)^2 + norm(V1)^2
-    obj_1 = c_1 * 0.25 * (norm1^2) + c_2 * 0.5 * norm1
-    obj_0 = obj_1
-    
-    x_obj = 0.5 * sum(part0.^2)
-    obj[1] = x_obj + lam * (sum(1 .- exp.(-ga .* abs.(U0))) + sum(1 .- exp.(-ga .* abs.(V0))))
-    
-    c = 1
+    Lls[1] = L
     
     # Test performance if requested
     if haskey(para, :test)
@@ -83,105 +76,84 @@ function DCAe(D, lam, theta, para)
             RMSE[1] = MatCompRMSE(U1, V1', temp_S, para[:test][:row], para[:test][:col], para[:test][:data])
             train_RMSE[1] = sqrt(sum(part0.^2) / length(data))
         end
-        println("method: $(output[:method]) data: $(para[:data]) RMSE $(RMSE[1])")
+        println("method: $(output[:method]) data: $(para[:data]) RMSE $(RMSE[1]) obj $(obj[1])")
     end
     
     for i in 1:max_iter
         start_time = time()
         
-        # Update extrapolation coefficient using Nesterov's formula
-        c = (1 + sqrt(1 + 4 * c^2)) / 2
-        bi = (c - 1) / c
+        y_U = copy(U1)
+        y_V = copy(V1)
         
-        grad_h1_U = U1 * norm1
-        grad_h1_V = V1 * norm1
+        y_obj = obj[i]
+        no_acceleration[i] = i
         
-        grad_h_U = c_1 * grad_h1_U + c_2 * U1
-        grad_h_V = c_1 * grad_h1_V + c_2 * V1
+        obj_y[i] = y_obj
         
+        # Calculate the inertial term (difference between current and previous iterate)
         delta_U = U1 - U0
         delta_V = V1 - V0
-        
-        D_x = obj_0 - obj_1 - sum(delta_U .* grad_h_U) - sum(delta_V .* grad_h_V)
-        
-        # Extrapolation step
-        for il in 1:1
-            kappa = C * uL / (L + uL)
-            
-            for ibi in 1:30
-                # Compute extrapolated point
-                y_U = (1 + bi) * U1 - bi * U0
-                y_V = (1 + bi) * V1 - bi * V0
-                
-                norm_y = norm(y_U)^2 + norm(y_V)^2
-                grad_h1_yU = y_U * norm_y
-                grad_h1_yV = y_V * norm_y
-                
-                grad_h2_yU = y_U
-                grad_h2_yV = y_V
-                
-                grad_h_yU = c_1 * grad_h1_yU + c_2 * grad_h2_yU
-                grad_h_yV = c_1 * grad_h1_yV + c_2 * grad_h2_yV
-                
-                obj_y = c_1 * 0.25 * (norm_y^2) + c_2 * 0.5 * norm_y
-                
-                D_y = obj_1 - obj_y - bi * sum(delta_U .* grad_h_yU) - bi * sum(delta_V .* grad_h_yV)
-                
-                # Check extrapolation condition
-                if D_y <= kappa * D_x + 1e-10
-                    break
-                else
-                    bi = 0.9 * bi  # Reduce extrapolation weight
-                end
-            end
-            
-            part1 = sparse_inp(y_U', y_V, row, col)
-            part0 = data - part1
-            
-            set_sparse_values!(spa, part0, length(part0))
-            
-            grad_U = -spa * y_V'
-            grad_V = -y_U' * spa
-        end
         
         U0 = copy(U1)
         V0 = copy(V1)
         
+        set_sparse_values!(spa, part0, length(part0))
+        
+        # Compute gradients with inertial term
+        grad_U = -spa * y_V'
+        grad_V = -y_U' * spa
+        
         if fun_num == 4
-            grad_U1 = grad_U - lam * ga * (1 .- exp.(-ga .* abs.(U1))) .* sign.(U1)
-            grad_V1 = grad_V - lam * ga * (1 .- exp.(-ga .* abs.(V1))) .* sign.(V1)
+            # Add inertial term to gradient for exponential regularization
+            grad_U = grad_U - lam * ga * (1 .- exp.(-ga .* abs.(y_U))) .* sign.(y_U) - 0.9999 * L * c_2 * delta_U
+            grad_V = grad_V - lam * ga * (1 .- exp.(-ga .* abs.(y_V))) .* sign.(y_V) - 0.9999 * L * c_2 * delta_V
         end
         
+        norm_y = norm(y_U)^2 + norm(y_V)^2
+        grad_h1_U = y_U * norm_y
+        grad_h1_V = y_V * norm_y
+        
+        grad_h2_U = y_U
+        grad_h2_V = y_V
+        
+        grad_h_U = c_1 * grad_h1_U + c_2 * grad_h2_U
+        grad_h_V = c_1 * grad_h1_V + c_2 * grad_h2_V
+        
         obj_h_y = c_1 * 0.25 * (norm_y^2) + c_2 * 0.5 * norm_y
-        obj_0 = obj_1
         
         # Update U and V
         for inneriter in 1:1
-            U1, V1 = make_update_iDCAe(grad_U1, grad_V1, grad_h_yU, grad_h_yV, c_1, c_2, uL, lam, ga, 6)
+            U1, V1 = make_update_iDCAe(grad_U, grad_V, grad_h_U, grad_h_V, c_1, c_2, L, lam, ga, 6)
             
-            norm1 = norm(U1)^2 + norm(V1)^2
-            obj_1 = c_1 * 0.25 * (norm1^2) + c_2 * 0.5 * norm1
+            norm_x = norm(U1)^2 + norm(V1)^2
+            
+            delta_U = U1 - y_U
+            delta_V = V1 - y_V
+            
+            obj_h_x = c_1 * 0.25 * (norm_x^2) + c_2 * 0.5 * norm_x
+            
+            reg = obj_h_x - obj_h_y - sum(delta_U .* grad_h_U) - sum(delta_V .* grad_h_V)
             
             part0 = sparse_inp(U1', V1, row, col)
             part0 = data - part0
             
-            x_obj = 0.5 * sum(part0.^2)
+            x_obj = obj_func(part0, U1, V1, lam, fun_num, ga)
         end
         
         Lls[i+1] = L
         Ils[i+1] = 1
         
         if i > 1
-            delta = (obj[i] - (x_obj + lam * (sum(1 .- exp.(-ga .* abs.(U1))) + sum(1 .- exp.(-ga .* abs.(V1)))))) / x_obj
+            delta = (obj[i] - x_obj) / x_obj
         else
             delta = Inf
         end
         
         Time[i+1] = time() - start_time
-        obj[i+1] = x_obj + lam * (sum(1 .- exp.(-ga .* abs.(U1))) + sum(1 .- exp.(-ga .* abs.(V1))))
+        obj[i+1] = x_obj
         
-        println("iter: $i; obj: $x_obj (dif: $delta); rank $(para[:maxR]); lambda: $lam; ibi: $ibi; uL: $uL; time: $(Time[i+1]); " *
-                "nnz U: $(count(!iszero, U1)/(size(U1,1)*size(U1,2))); nnz V: $(count(!iszero, V1)/(size(V1,1)*size(V1,2)))")
+        println("iter: $i; obj: $x_obj (dif: $delta); rank $(para[:maxR]); lambda: $lam; L $L; time: $(Time[i+1]); " *
+                "nnz U: $(count(!iszero, U1)/(size(U1,1)*size(U1,2))); nnz V $(count(!iszero, V1)/(size(V1,1)*size(V1,2)))")
         
         nnz_UV[i+1, 1] = count(!iszero, U1) / (size(U1, 1) * size(U1, 2))
         nnz_UV[i+1, 2] = count(!iszero, V1) / (size(V1, 1) * size(V1, 2))
