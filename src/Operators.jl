@@ -1,5 +1,7 @@
 # Operators.jl - Proximal operators and update functions
 
+using Polynomials  # Make sure this is imported for Poly
+
 """
     make_update_iDCAe(grad_U, grad_V, grad_h_U, grad_h_V, c_1, c_2, L, lam, ga, fun_num)
 
@@ -45,7 +47,11 @@ function make_update_iDCAe(grad_U, grad_V, grad_h_U, grad_h_V, c_1, c_2, L, lam,
     qk_norm_sq = sum(qk.^2)
     coeff = [c_1*(pk_norm_sq + qk_norm_sq), 0, c_2, -1]
     
-    r_vals = roots(Poly(reverse(coeff)))
+    # Fixed cubic equation solution using Polynomials.jl
+    p = Polynomial(reverse(coeff))
+    r_vals = roots(p)
+    
+    # Filter for real positive roots
     real_positive = filter(r -> isreal(r) && real(r) > 0, r_vals)
     
     if isempty(real_positive)

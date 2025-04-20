@@ -3,8 +3,9 @@ module DifferenceOfConvex
 using SparseArrays, LinearAlgebra, Statistics, Random, Roots
 using Plots
 
-# Export main functions
-export DCA, iDCA, DCAe, run_experiment, plot_results
+# Export main functions AND utility functions
+export DCA, iDCA, DCAe, run_experiment, plot_results, analyze_results
+export power_method, obj_func, MatCompRMSE
 
 # Include all component files
 include("Utils.jl")

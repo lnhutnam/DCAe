@@ -42,16 +42,16 @@ function DCA(D, lam, theta, para)
     c_1 = 3
     c_2 = norm(data)
     
-    # Initialize tracking variables
-    obj = zeros(max_iter + 1)
-    obj_y = zeros(max_iter + 1)
-    RMSE = zeros(max_iter + 1)
-    train_RMSE = zeros(max_iter + 1)
-    Time = zeros(max_iter + 1)
-    Lls = zeros(max_iter + 1)
-    Ils = zeros(max_iter + 1)
-    nnz_UV = zeros(max_iter + 1, 2)
-    no_acceleration = zeros(Int, max_iter + 1)
+    # Initialize tracking variables - use max_iter + 2 to ensure enough space
+    obj = zeros(max_iter + 2)
+    obj_y = zeros(max_iter + 2)
+    RMSE = zeros(max_iter + 2)
+    train_RMSE = zeros(max_iter + 2)
+    Time = zeros(max_iter + 2)
+    Lls = zeros(max_iter + 2)
+    Ils = zeros(max_iter + 2)
+    nnz_UV = zeros(max_iter + 2, 2)
+    no_acceleration = zeros(Int, max_iter + 2)
     
     part0 = partXY(U0', V0, row, col, length(data))
     part0 = data - part0
@@ -65,20 +65,28 @@ function DCA(D, lam, theta, para)
     L = 1
     Lls[1] = L
     
-    # Test performance if requested
-    if haskey(para, :test)
+    # Test performance if requested - modified to use individual test parameters
+    if haskey(para, :test_row) && haskey(para, :test_col) && haskey(para, :test_data)
         temp_S = Matrix(I, size(U1, 2), size(V1', 2))
-        if para[:test][:m] != m
-            RMSE[1] = MatCompRMSE(V1', U1, temp_S, para[:test][:row], para[:test][:col], para[:test][:data])
+        if para[:test_m] != m
+            RMSE[1] = MatCompRMSE(V1', U1, temp_S, para[:test_row], para[:test_col], para[:test_data])
             train_RMSE[1] = sqrt(sum(part0.^2) / length(data))
         else
-            RMSE[1] = MatCompRMSE(U1, V1', temp_S, para[:test][:row], para[:test][:col], para[:test][:data])
+            RMSE[1] = MatCompRMSE(U1, V1', temp_S, para[:test_row], para[:test_col], para[:test_data])
             train_RMSE[1] = sqrt(sum(part0.^2) / length(data))
         end
         println("method: $(output[:method]) data: $(para[:data]) RMSE $(RMSE[1]) obj $(obj[1])")
     end
     
-    for i in 1:max_iter
+    # Initialize iteration counter outside the loop to ensure it's accessible after the loop ends
+    i = 0
+    
+    # Force at least 3 iterations to get a proper line
+    min_iterations = 3
+    
+    # Main algorithm loop
+    for iter = 1:max_iter
+        i = iter  # Update the outer i to track the current iteration
         start_time = time()
         
         y_U = copy(U1)
@@ -114,6 +122,9 @@ function DCA(D, lam, theta, para)
         grad_h_V = c_1 * grad_h1_V + c_2 * grad_h2_V
         
         obj_h_y = c_1 * 0.25 * (norm_y^2) + c_2 * 0.5 * norm_y
+        
+        # Initialize x_obj before the loop
+        x_obj = 0.0
         
         # Update U and V
         for inneriter in 1:1
@@ -152,43 +163,51 @@ function DCA(D, lam, theta, para)
         nnz_UV[i+1, 1] = count(!iszero, U1) / (size(U1, 1) * size(U1, 2))
         nnz_UV[i+1, 2] = count(!iszero, V1) / (size(V1, 1) * size(V1, 2))
         
-        # Test performance if requested
-        if haskey(para, :test)
+        # Test performance if requested - modified to use individual test parameters
+        if haskey(para, :test_row) && haskey(para, :test_col) && haskey(para, :test_data)
             temp_S = Matrix(I, size(U1, 2), size(V1', 2))
-            if para[:test][:m] != m
-                RMSE[i+1] = MatCompRMSE(V1', U1, temp_S, para[:test][:row], para[:test][:col], para[:test][:data])
+            if para[:test_m] != m
+                RMSE[i+1] = MatCompRMSE(V1', U1, temp_S, para[:test_row], para[:test_col], para[:test_data])
                 train_RMSE[i+1] = sqrt(sum(part0.^2) / length(data))
             else
-                RMSE[i+1] = MatCompRMSE(U1, V1', temp_S, para[:test][:row], para[:test][:col], para[:test][:data])
+                RMSE[i+1] = MatCompRMSE(U1, V1', temp_S, para[:test_row], para[:test_col], para[:test_data])
                 train_RMSE[i+1] = sqrt(sum(part0.^2) / length(data))
             end
             println("method: $(output[:method]) data: $(para[:data]) RMSE $(RMSE[i+1])")
         end
         
-        if i > 1 && abs(delta) < tol
+        # Only check convergence after minimum iterations
+        if i > min_iterations && abs(delta) < tol
+            println("Convergence reached after $i iterations (delta = $delta < tol = $tol)")
             break
         end
         
         if sum(Time) > get(para, :maxtime, Inf)
+            println("Maximum time limit reached after $i iterations")
             break
         end
     end
     
-    # Prepare output
-    output[:obj] = obj[1:(i+1)]
+    final_iter = i + 1  # Because we added one more during the last loop iteration
+    
+    # Debug output
+    println("DCA completed with $final_iter data points")
+    
+    # Prepare output with the correct range
+    output[:obj] = obj[1:final_iter]
     output[:Rank] = para[:maxR]
-    output[:RMSE] = RMSE[1:(i+1)]
-    output[:trainRMSE] = train_RMSE[1:(i+1)]
+    output[:RMSE] = RMSE[1:final_iter]
+    output[:trainRMSE] = train_RMSE[1:final_iter]
     
     Time = cumsum(Time)
-    output[:Time] = Time[1:(i+1)]
+    output[:Time] = Time[1:final_iter]
     output[:U] = U1
     output[:V] = V1
     output[:data] = para[:data]
-    output[:L] = Lls[1:(i+1)]
-    output[:Ils] = Ils[1:(i+1)]
-    output[:nnzUV] = nnz_UV[1:(i+1), :]
-    output[:no_acceleration] = no_acceleration[1:(i+1)]
+    output[:L] = Lls[1:final_iter]
+    output[:Ils] = Ils[1:final_iter]
+    output[:nnzUV] = nnz_UV[1:final_iter, :]
+    output[:no_acceleration] = no_acceleration[1:final_iter]
     output[:lambda] = lam
     output[:theta] = ga
     output[:reg] = get(para, :reg, "unknown")

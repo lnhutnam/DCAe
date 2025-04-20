@@ -1,15 +1,15 @@
-# main.jl - Example script for using DifferenceOfConvex package
+# Example script for using DifferenceOfConvex package
 
 using SparseArrays, LinearAlgebra, Statistics, Random
-using JLD, JLD2  # For loading/saving data
+using MAT  # For loading MAT files
 using Plots  # For visualization
 
 # Add the package directory to the path if needed
-# push!(LOAD_PATH, pwd())
+# (only necessary if the package is not installed)
+push!(LOAD_PATH, joinpath(dirname(@__DIR__), "src"))
 
 # Import our module
-include("DifferenceOfConvex.jl")
-using .DifferenceOfConvex
+using DifferenceOfConvex
 
 """
     generate_synthetic_data(m, n, r, density=0.1)
@@ -50,6 +50,28 @@ function generate_synthetic_data(m, n, r, density=0.1)
     return sparse_matrix, U_true, V_true
 end
 
+# Define a local power_method function to avoid module dependency issues
+# function power_method(D, R, max_iter::Int, tol)
+#     m, n = size(D)
+#     r = size(R, 2)
+#     U = randn(m, r)
+    
+#     for i in 1:max_iter
+#         old_U = copy(U)
+#         U = D * R
+        
+#         for j in 1:r
+#             U[:, j] /= norm(U[:, j])
+#         end
+        
+#         if norm(U - old_U) < tol
+#             break
+#         end
+#     end
+    
+#     return U
+# end
+
 """
     run_synthetic_example()
     
@@ -67,91 +89,202 @@ function run_synthetic_example()
     density = 0.1  # 10% of entries observed
     data_matrix, U_true, V_true = generate_synthetic_data(m, n, r, density)
     
-    # Save synthetic data for future use
-    save("synthetic_data.jld2", "data", data_matrix, "U_true", U_true, "V_true", V_true)
-    println("Synthetic data saved to synthetic_data.jld2")
-    
-    # Set parameters for algorithms
-    params = Dict(
-        :maxR => r,       # Rank of approximation
-        :maxtime => 10,   # Maximum runtime (seconds)
-        :maxIter => 50,   # Maximum iterations
-        :tol => 1e-6,     # Convergence tolerance
-        :fun_num => 4,    # Regularization function (4 = exponential)
-        :lambda => 0.1,   # Regularization strength
-        :theta => 5       # Regularization parameter for exponential
+    # Create parameters with explicit types (to avoid type conversion errors)
+    params = Dict{Symbol, Any}(
+        :maxR => Int(r),       
+        :maxtime => Float64(10),
+        :maxIter => Int(100),
+        :tol => Float64(1e-9),
+        :fun_num => Int(4),
+        :lambda => Float64(0.1),
+        :theta => Float64(5),
+        :data => "synthetic"
     )
     
-    # Run experiment
-    results = run_experiment("synthetic_data.jld2", params)
+    # Initialize test parameters (70% train, 30% test split)
+    row, col, val = findnz(data_matrix)
+    idx = randperm(length(val))
+    train_idx = idx[1:floor(Int, length(val)*0.7)]
+    test_idx = idx[ceil(Int, length(val)*0.3):end]
+    
+    # Normalize values
+    val = val .- mean(val)
+    val = val ./ std(val)
+    
+    # Create sparse train data
+    train_data = sparse(row[train_idx], col[train_idx], val[train_idx], m, n)
+    
+    # Create test parameters with explicit array types
+    test_row = row[test_idx]
+    test_col = col[test_idx]
+    test_data = val[test_idx]
+    
+    # Define R before using it
+    R = randn(n, params[:maxR])
+    
+    # Use power_method with the newly defined R
+    U0 = power_method(train_data, R, 5, 1e-6)
+    
+    F = svd(U0' * train_data)
+    V0 = F.Vt'
+    
+    # Instead of using a nested dictionary, which might cause type issues,
+    # we'll set up test parameters individually
+    params[:test_row] = test_row
+    params[:test_col] = test_col
+    params[:test_data] = test_data
+    params[:test_m] = m
+    params[:test_n] = n
+    params[:R] = R
+    params[:U0] = U0
+    params[:V0] = V0
+    
+    # Run algorithms directly
+    println("\n=== Running DCA ===")
+    result_dca = DCA(train_data, params[:lambda], params[:theta], params)
+    
+    println("\n=== Running iDCA ===")
+    result_idca = iDCA(train_data, params[:lambda], params[:theta], params)
+    
+    println("\n=== Running DCAe ===")
+    result_dcae = DCAe(train_data, params[:lambda], params[:theta], params)
+    
+    # Combine results
+    results = Dict("DCA" => result_dca, "iDCA" => result_idca, "DCAe" => result_dcae)
     
     # Plot results
     objective_plot, rmse_plot, sparsity_plot = plot_results(results)
     
     # Save plots
-    savefig(objective_plot, "objective_comparison.png")
-    savefig(rmse_plot, "rmse_comparison.png")
-    savefig(sparsity_plot, "sparsity_comparison.png")
+    savefig(objective_plot, "synthetic_objective.png")
+    savefig(rmse_plot, "synthetic_rmse.png")
+    savefig(sparsity_plot, "synthetic_sparsity.png")
     
     # Display plots
     display(objective_plot)
     display(rmse_plot)
     display(sparsity_plot)
     
-    # Analyze results
-    analysis = analyze_results(results)
-    
-    # Print analysis
-    println("\n=== Performance Analysis ===")
-    for (method, metrics) in analysis
-        if method != :thresholds
-            println("\n$method:")
-            println("  Final objective: $(metrics[:final_obj])")
-            println("  Final RMSE: $(metrics[:final_rmse])")
-            println("  Iterations: $(metrics[:n_iterations])")
-            println("  Total time: $(metrics[:total_time]) seconds")
-            println("  Avg time per iteration: $(metrics[:avg_time_per_iter]) seconds")
-            println("  Final sparsity (U): $(metrics[:final_sparsity].U * 100)%")
-            println("  Final sparsity (V): $(metrics[:final_sparsity].V * 100)%")
-        end
-    end
-    
     # Compare to true matrices
-    println("\n=== Comparison to True Matrices ===")
-    for (method, result) in results
-        recovered_matrix = result[:U] * result[:V]'
-        error = norm(recovered_matrix - U_true * V_true') / norm(U_true * V_true')
-        println("$method relative error: $error")
-    end
-    
-    println("\nExperiment completed. Results saved to objective_comparison.png, rmse_comparison.png, and sparsity_comparison.png")
+    # println("\n=== Comparison to True Matrices ===")
+    # for (method, result) in results
+    #     # Extract the recovered factors
+    #     recovered_U = result[:U]  # m×r matrix
+    #     recovered_V = result[:V]  # n×r matrix
+        
+    #     # Calculate error using Frobenius norm of the difference at sampled points
+    #     # This avoids constructing the full matrices
+    #     error_sum = 0.0
+    #     n_sampled = min(1000, length(row))  # Use a subset of points for efficiency
+        
+    #     # Use a random sample of points from the original data
+    #     sample_indices = randperm(length(row))[1:n_sampled]
+        
+    #     for idx in sample_indices
+    #         i = row[idx]
+    #         j = col[idx]
+            
+    #         # Make sure indices are within bounds
+    #         if i <= size(recovered_U, 1) && j <= size(recovered_V, 1)
+    #             # Calculate the true value and predicted value at this point
+    #             true_val = U_true[i, :] ⋅ V_true[j, :]
+    #             pred_val = recovered_U[i, :] ⋅ recovered_V[j, :]
+                
+    #             error_sum += (true_val - pred_val)^2
+    #         end
+    #     end
+        
+    #     # Calculate relative error
+    #     rmse = sqrt(error_sum / n_sampled)
+        
+    #     # We can't compute full matrix norm efficiently, so just report RMSE
+    #     println("$method RMSE on sampled points: $rmse")
+    # end
 end
 
 """
     run_movielens_example()
     
-Run a demonstration on the MovieLens dataset if available.
+Run a demonstration on the MovieLens dataset using the movielens1m.mat file.
 """
 function run_movielens_example()
-    if isfile("movielens1m.jld") || isfile("movielens1m.jld2")
+    data_path = joinpath(dirname(@__DIR__), "data", "movielens1m.mat")
+    
+    if isfile(data_path)
         println("\n=== Running MovieLens experiment ===")
         
-        # Use specific parameters for MovieLens
-        params = Dict(
-            :maxR => 10,      # Higher rank for real data
-            :maxtime => 60,   # Longer runtime
-            :maxIter => 100,  # More iterations
-            :tol => 1e-8,     # Tighter tolerance
-            :fun_num => 4,    # Exponential regularization
-            :lambda => 0.5,   # Stronger regularization
-            :theta => 5       # Exponential parameter
+        # Load the MAT file
+        println("Loading MovieLens1M dataset...")
+        matdata = matread(data_path)
+        data = matdata["data"]  # Extract the data matrix
+        
+        # Create parameters with explicit types
+        params = Dict{Symbol, Any}(
+            :maxR => Int(5),
+            :maxtime => Float64(20),
+            :maxIter => Int(50),
+            :tol => Float64(1e-9),
+            :fun_num => Int(4),
+            :reg => "exponential regularization",
+            :lambda => Float64(0.1),
+            :theta => Float64(5),
+            :data => "movielens1m"
         )
         
-        # Determine file format
-        file_path = isfile("movielens1m.jld") ? "movielens1m.jld" : "movielens1m.jld2"
+        # Extract sparse matrix data
+        row, col, val = findnz(data)
         
-        # Run experiment
-        results = run_experiment(file_path, params)
+        # Normalize values
+        val = val .- mean(val)
+        val = val ./ std(val)
+        
+        # Split into train and test (70-30 split)
+        Random.seed!(30)  # For reproducibility
+        idx = randperm(length(val))
+        train_idx = idx[1:floor(Int, length(val)*0.7)]
+        test_idx = idx[ceil(Int, length(val)*0.3):end]
+        
+        m, n = size(data)
+        
+        # Create sparse train data
+        train_data = sparse(row[train_idx], col[train_idx], val[train_idx], m, n)
+        
+        # Extract test data as individual arrays
+        test_row = row[test_idx]
+        test_col = col[test_idx]
+        test_data = val[test_idx]
+        
+        # Initialize the factors
+        R = randn(n, params[:maxR])
+        
+        # Use power_method with explicit integer argument
+        U0 = power_method(train_data, R, 5, 1e-6)
+        
+        F = svd(U0' * train_data)
+        V0 = F.Vt'
+        
+        # Set up parameters individually
+        params[:test_row] = test_row
+        params[:test_col] = test_col
+        params[:test_data] = test_data
+        params[:test_m] = m
+        params[:test_n] = n
+        params[:R] = R
+        params[:U0] = U0
+        params[:V0] = V0
+        
+        # Run algorithms
+        println("\n=== Running DCA ===")
+        result_dca = DCA(train_data, params[:lambda], params[:theta], params)
+        
+        println("\n=== Running iDCA ===")
+        result_idca = iDCA(train_data, params[:lambda], params[:theta], params)
+        
+        println("\n=== Running DCAe ===")
+        result_dcae = DCAe(train_data, params[:lambda], params[:theta], params)
+        
+        # Combine results
+        results = Dict("DCA" => result_dca, "iDCA" => result_idca, "DCAe" => result_dcae)
         
         # Plot and save results
         objective_plot, rmse_plot, sparsity_plot = plot_results(results)
@@ -166,8 +299,8 @@ function run_movielens_example()
         
         println("\nMovieLens experiment completed. Results saved to movielens_*.png files")
     else
-        println("\nMovieLens dataset not found. Skipping this example.")
-        println("To run this example, place the movielens1m.jld or movielens1m.jld2 file in the current directory.")
+        println("\nMovieLens dataset not found at $data_path. Skipping this example.")
+        println("To run this example, make sure the movielens1m.mat file is in the data directory.")
     end
 end
 
@@ -179,11 +312,13 @@ function main()
     # Run synthetic example
     run_synthetic_example()
     
-    # Try to run MovieLens example if data is available
+    # Run MovieLens example
     run_movielens_example()
 end
 
 # Execute main function if this script is run directly
 if abspath(PROGRAM_FILE) == @__FILE__
     main()
+else
+    main()  # Also run main if included as a module
 end

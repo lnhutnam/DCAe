@@ -81,7 +81,7 @@ Implement power method to find principal components.
 # Returns
 - Matrix U with orthogonal columns
 """
-function power_method(D, R, max_iter, tol)
+function power_method(D, R, max_iter::Int, tol)
     m, n = size(D)
     r = size(R, 2)
     U = randn(m, r)
